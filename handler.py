@@ -1,9 +1,10 @@
 import runpod
-import cv2
 import os
 import json
 import urllib.request
 import tempfile
+import subprocess
+import numpy as np
 from pathlib import Path
 from ultralytics import YOLO
 
@@ -52,19 +53,27 @@ def download_video(url: str, dst: str):
     print(f"[download] Done")
 
 
-def process_video(video_path: str, target_fps: float, conf: float, iou: float) -> dict:
-    cap = cv2.VideoCapture(video_path)
-    if not cap.isOpened():
-        raise RuntimeError(f"Cannot open video: {video_path}")
+def get_video_info(video_path: str) -> tuple:
+    cmd = [
+        "ffprobe", "-v", "quiet", "-print_format", "json",
+        "-show_entries", "stream=width,height,codec_name,duration,r_frame_rate",
+        video_path,
+    ]
+    result = subprocess.run(cmd, capture_output=True, text=True)
+    info = json.loads(result.stdout)
+    stream = info["streams"][0]
+    num, den = stream["r_frame_rate"].split("/")
+    orig_fps = float(num) / float(den)
+    width = int(stream["width"])
+    height = int(stream["height"])
+    duration = float(stream.get("duration", 0))
+    return orig_fps, width, height, duration
 
-    orig_fps = cap.get(cv2.CAP_PROP_FPS)
-    total_frames = int(cap.get(cv2.CAP_PROP_FRAME_COUNT))
-    width = int(cap.get(cv2.CAP_PROP_FRAME_WIDTH))
-    height = int(cap.get(cv2.CAP_PROP_FRAME_HEIGHT))
-    duration = total_frames / orig_fps if orig_fps > 0 else 0
+
+def process_video(video_path: str, target_fps: float, conf: float, iou: float) -> dict:
+    orig_fps, width, height, duration = get_video_info(video_path)
 
     if duration > MAX_DURATION_SEC:
-        cap.release()
         raise RuntimeError(
             f"Video too long: {duration:.0f}s > {MAX_DURATION_SEC}s limit"
         )
@@ -73,66 +82,86 @@ def process_video(video_path: str, target_fps: float, conf: float, iou: float) -
 
     print(
         f"[process] {width}x{height}, {duration:.1f}s, "
-        f"{total_frames} frames @ {orig_fps:.2f}fps, interval={interval}"
+        f"{int(duration * orig_fps)} frames @ {orig_fps:.2f}fps, interval={interval}"
     )
 
+    # ── Extract frames via ffmpeg pipe (raw RGB24) ───────────────────────
+    cmd = [
+        "ffmpeg", "-i", video_path,
+        "-vf", f"select=not(mod(n\\,{interval}))",
+        "-vsync", "vfr",
+        "-f", "image2pipe",
+        "-vcodec", "rawvideo",
+        "-pix_fmt", "rgb24",
+        "-",
+    ]
+
+    proc = subprocess.Popen(
+        cmd, stdout=subprocess.PIPE, stderr=subprocess.DEVNULL, bufsize=10**8
+    )
+
+    frame_size = width * height * 3
     face_timeline = []
     unique_track_ids: set[int] = set()
     frame_idx = 0
-    step = 0
 
     while True:
-        ret, frame = cap.read()
-        if not ret:
+        raw = proc.stdout.read(frame_size)
+        if not raw or len(raw) < frame_size:
             break
 
-        if step % interval == 0:
-            timestamp = frame_idx / orig_fps
+        frame = np.frombuffer(raw, dtype=np.uint8).reshape((height, width, 3))
+        timestamp = frame_idx * interval / orig_fps
 
-            results = model.track(
-                frame,
-                persist=True,
-                conf=conf,
-                iou=iou,
-                verbose=False,
-            )
+        results = model.track(
+            frame,
+            persist=True,
+            conf=conf,
+            iou=iou,
+            verbose=False,
+        )
 
-            detections = []
-            boxes_data = results[0].boxes
-            if boxes_data is not None and boxes_data.id is not None:
-                boxes = boxes_data.xyxy.cpu().numpy()
-                track_ids = boxes_data.id.cpu().numpy().astype(int)
-                confs = boxes_data.conf.cpu().numpy()
+        detections = []
+        boxes_data = results[0].boxes
+        if boxes_data is not None and boxes_data.id is not None:
+            boxes = boxes_data.xyxy.cpu().numpy()
+            track_ids = boxes_data.id.cpu().numpy().astype(int)
+            confs = boxes_data.conf.cpu().numpy()
 
-                for box, tid, c in zip(boxes, track_ids, confs):
-                    x1, y1, x2, y2 = box
-                    detections.append(
-                        {
-                            "track_id": int(tid),
-                            "bbox": [
-                                round(x1 / width, 4),
-                                round(y1 / height, 4),
-                                round(x2 / width, 4),
-                                round(y2 / height, 4),
-                            ],
-                            "confidence": round(float(c), 4),
-                        }
-                    )
-                    unique_track_ids.add(int(tid))
+            for box, tid, c in zip(boxes, track_ids, confs):
+                x1, y1, x2, y2 = box
+                detections.append(
+                    {
+                        "track_id": int(tid),
+                        "bbox": [
+                            round(x1 / width, 4),
+                            round(y1 / height, 4),
+                            round(x2 / width, 4),
+                            round(y2 / height, 4),
+                        ],
+                        "confidence": round(float(c), 4),
+                    }
+                )
+                unique_track_ids.add(int(tid))
 
-            face_timeline.append(
-                {
-                    "frame_index": len(face_timeline),
-                    "frame_original": frame_idx,
-                    "timestamp_sec": round(timestamp, 2),
-                    "detections": detections,
-                }
-            )
+        face_timeline.append(
+            {
+                "frame_index": len(face_timeline),
+                "frame_original": frame_idx * interval,
+                "timestamp_sec": round(timestamp, 2),
+                "detections": detections,
+            }
+        )
 
         frame_idx += 1
-        step += 1
 
-    cap.release()
+    proc.stdout.close()
+    proc.wait()
+
+    print(
+        f"[process] Done: {len(unique_track_ids)} tracks, "
+        f"{len(face_timeline)} frames processed"
+    )
 
     return {
         "faces": face_timeline,
