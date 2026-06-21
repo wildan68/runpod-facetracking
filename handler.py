@@ -37,7 +37,18 @@ print(f"[init] Model loaded: {MODEL_PATH}")
 # ---------------------------------------------------------------------------
 def download_video(url: str, dst: str):
     print(f"[download] {url} -> {dst}")
-    urllib.request.urlretrieve(url, dst)
+    req = urllib.request.Request(
+        url,
+        headers={
+            "User-Agent": "Mozilla/5.0 (compatible; KlipYt-FaceTracking/1.0)",
+        },
+    )
+    with urllib.request.urlopen(req, timeout=120) as src, open(dst, "wb") as f:
+        while True:
+            chunk = src.read(8 * 1024 * 1024)  # 8MB
+            if not chunk:
+                break
+            f.write(chunk)
     print(f"[download] Done")
 
 
