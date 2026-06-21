@@ -14,7 +14,7 @@ MODEL_PATH = os.environ.get("MODEL_PATH", "/models/yolov11n-face.pt")
 MODEL_URL = (
     "https://github.com/YapaLab/yolo-face/releases/download/1.0.0/yolov11n-face.pt"
 )
-MAX_DURATION_SEC = int(os.environ.get("MAX_DURATION_SEC", 1800))  # 30 min
+MAX_DURATION_SEC = int(os.environ.get("MAX_DURATION_SEC", 7200))  # 2 hours
 DEFAULT_FPS = 2.0
 DEFAULT_CONF = 0.4
 DEFAULT_IOU = 0.5
