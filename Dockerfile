@@ -1,4 +1,4 @@
-FROM runpod/base:0.7.0-cuda12.4.0
+FROM runpod/base:1.0.3-cuda1290-ubuntu2204
 
 WORKDIR /
 
